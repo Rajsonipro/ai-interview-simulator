@@ -11,6 +11,11 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 FILLER_WORDS = ["um", "uh", "like", "you know", "basically", "literally",
                 "actually", "sort of", "kind of", "i mean", "right", "okay so"]
 
+PROFANITY_WORDS = [
+    "fuck", "shit", "bitch", "asshole", "bastard", "damn", "crap",
+    "wtf", "stfu", "idiot", "stupid", "dumb", "moron", "shut up"
+]
+
 DOMAIN_CONTEXTS = {
     "Software Developer": {
         "Beginner": "entry-level software developer focusing on basic programming concepts, data structures, and algorithms",
@@ -214,21 +219,75 @@ Evaluate this answer and return ONLY a JSON object exactly matching this schema:
 
 def get_fallback_evaluation(answer: str, filler_count: int, filler_list: List[str],
                              wpm: float) -> Dict[str, Any]:
+    answer_lower = answer.lower().strip()
     word_count = len(answer.split())
-    technical = min(85, max(45, word_count * 1.2))
-    communication = min(90, max(40, 70 - filler_count * 5 + (5 if wpm > 120 else 0)))
-    confidence = min(85, max(40, 65 - filler_count * 3))
+
+    # --- Profanity / gibberish detection ---
+    found_profanity = [p for p in PROFANITY_WORDS if re.search(r'\b' + re.escape(p) + r'\b', answer_lower)]
+    is_gibberish = word_count <= 3 and not any(c.isalpha() for c in answer)
+
+    if found_profanity or is_gibberish:
+        return {
+            "technical_score": 5.0,
+            "communication_score": 5.0,
+            "confidence_score": 5.0,
+            "overall_score": 5.0,
+            "feedback": "This response contains inappropriate language or is not a valid answer. Professional communication is essential in any interview setting. Please provide a respectful, relevant answer.",
+            "filler_words": filler_count,
+            "filler_word_list": list(set(filler_list)),
+            "words_per_minute": wpm,
+            "improvement_tips": [
+                "Always maintain professional and respectful language in interviews.",
+                "Provide a structured answer relevant to the question asked.",
+                "Use the STAR method: Situation, Task, Action, Result."
+            ]
+        }
+
+    # --- Scoring based on content quality ---
+    # Technical score: based on answer length & depth
+    if word_count < 10:
+        technical = 20.0
+    elif word_count < 30:
+        technical = 40.0
+    elif word_count < 60:
+        technical = 60.0
+    elif word_count < 100:
+        technical = 75.0
+    else:
+        technical = min(90.0, 75 + (word_count - 100) * 0.1)
+
+    # Communication score: penalise filler words, reward good pace
+    communication = 80.0
+    communication -= filler_count * 5
+    if wpm > 180:
+        communication -= 10
+    elif wpm > 0 and wpm < 80:
+        communication -= 10
+    elif 100 <= wpm <= 160:
+        communication += 5
+    communication = min(90.0, max(10.0, communication))
+
+    # Confidence score: mix of length, pace, and filler words
+    confidence = 75.0 - filler_count * 4
+    if word_count < 20:
+        confidence -= 20
+    elif word_count > 80:
+        confidence += 10
+    confidence = min(90.0, max(10.0, confidence))
+
     overall = round((technical + communication + confidence) / 3, 1)
 
-    # Dynamic feedback based on word count and quality
-    if word_count < 20:
-        feedback = "Your response was quite brief. In a real interview, try to expand more on your thought process and provide specific context."
+    # --- Dynamic feedback ---
+    if word_count < 10:
+        feedback = "Your response was far too short for a real interview. Interviewers expect detailed, structured answers with examples and context."
+    elif word_count < 30:
+        feedback = "Your response was brief. Try to elaborate more — use the STAR method (Situation, Task, Action, Result) to structure longer, more impactful answers."
     elif filler_count > 5:
-        feedback = "You have the right ideas, but the delivery was slightly hindered by filler words. Focusing on steady pacing will make your points much more impactful."
+        feedback = "Good content, but your delivery was weakened by many filler words. Practice pausing instead of using 'um' or 'uh' — it projects confidence."
     elif word_count > 100:
-        feedback = "Excellent depth! You provided a very thorough explanation. Just ensure you keep the 'STAR' method in mind to keep your answers structured."
+        feedback = "Excellent depth and thoroughness! Make sure your answers stay structured. Consider splitting long answers with clear signposting like 'Firstly...', 'Additionally...', 'In conclusion...'"
     else:
-        feedback = "A solid, well-rounded answer. You covered the basics effectively. To reach the 'Expert' level, try to talk more about the specific outcomes of your actions."
+        feedback = "A solid answer. You covered the question well. To stand out further, include specific, quantifiable outcomes from your past experience."
 
     tips = []
     if filler_count > 3:
