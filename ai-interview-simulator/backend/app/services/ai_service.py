@@ -55,43 +55,85 @@ def calculate_wpm(text: str, duration_seconds: float) -> float:
 
 import google.generativeai as genai
 import asyncio
+from dotenv import load_dotenv
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# Load .env relative to this file's location so the key is always available
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+GEMINI_MODEL = "gemini-2.0-flash-lite"
+
+def _get_gemini_model():
+    """Get a freshly configured Gemini model, reading the key at call time."""
+    key = os.getenv("GEMINI_API_KEY", "")
+    if not key:
+        return None
+    genai.configure(api_key=key)
+    return genai.GenerativeModel(GEMINI_MODEL)
     
-async def generate_questions(domain: str, difficulty: str, resume_text: str = None) -> List[str]:
+# Diverse topic pools to pick from, ensuring question variety
+QUESTION_TOPICS = {
+    "Software Developer": [
+        "system design", "data structures", "algorithms", "debugging", "code review",
+        "API design", "database optimization", "concurrency", "security", "testing",
+        "CI/CD pipelines", "cloud architecture", "microservices", "performance tuning",
+        "refactoring legacy code", "team collaboration", "agile process", "technical debt"
+    ],
+    "HR": [
+        "recruitment strategy", "employee retention", "conflict resolution", "performance reviews",
+        "onboarding", "diversity & inclusion", "HR analytics", "compensation strategy",
+        "leadership development", "change management", "workplace culture", "labor law"
+    ],
+    "Marketing": [
+        "brand strategy", "digital campaigns", "SEO", "content marketing", "data analytics",
+        "social media growth", "customer journey mapping", "A/B testing", "influencer marketing",
+        "email marketing", "product launches", "competitive analysis", "market segmentation"
+    ]
+}
+
+async def generate_questions(domain: str, difficulty: str, resume_text: str = None, session_id: int = None) -> List[str]:
     context = DOMAIN_CONTEXTS.get(domain, {}).get(difficulty, f"{difficulty} level {domain}")
     
+    import random
+    # Pick 5 random topics to focus questions on — this is the key to variety
+    all_topics = QUESTION_TOPICS.get(domain, QUESTION_TOPICS["Software Developer"])
+    chosen_topics = random.sample(all_topics, min(5, len(all_topics)))
+    topics_str = ", ".join(chosen_topics)
+    
+    # Unique seed per session
+    seed = session_id if session_id else random.randint(10000, 99999)
+
     resume_context = ""
     if resume_text:
-        print("DEBUG: Using resume for question generation")
-        resume_context = f"\n\nCANDIDATE'S RESUME / BACKGROUND:\n{resume_text}\n\nPlease tailor some of the questions to the candidate's specific projects and experience while maintaining the {difficulty} level professional standards."
+        resume_context = f"\n\nCANDIDATE'S RESUME:\n{resume_text[:3000]}\n\nTailor questions to their specific skills and experience above."
 
-    prompt = f"""Generate exactly 5 interview questions for a {context} position.{resume_context}
+    prompt = f"""You are an expert technical interviewer. Generate exactly 5 UNIQUE interview questions for a {context} position.
 
-Requirements:
-- Questions must be realistic and professional
-- Mix of behavioral, technical, and situational questions
-- Appropriate for {difficulty} level
-- Each question should be distinct and test different competencies
+Focus these questions specifically on these topics: {topics_str}
 
-Return ONLY a JSON array of 5 strings, no other text:
+Session ID: {seed}{resume_context}
+
+Strict rules:
+- Cover ONLY the listed focus topics above
+- NO generic questions like 'Tell me about yourself' or 'What are your strengths?'
+- Each question must test a different topic from the focus list
+- Questions must be specific, scenario-based, and thought-provoking
+- Difficulty must match: {difficulty} level
+
+Return ONLY a raw JSON array of 5 strings:
 ["question1", "question2", "question3", "question4", "question5"]"""
 
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "":
+    model = _get_gemini_model()
+    if not model:
+        print("WARNING: GEMINI_API_KEY not found, using fallback questions")
         return get_fallback_questions(domain, difficulty)
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        # Move synchronous blocking call to thread pool
+        print(f"INFO: Generating AI questions for {domain}/{difficulty} (seed={seed}, topics={topics_str})")
         response = await asyncio.to_thread(
             model.generate_content,
             prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
+                temperature=0.95,
                 response_mime_type="application/json"
             )
         )
@@ -99,10 +141,16 @@ Return ONLY a JSON array of 5 strings, no other text:
         content = response.text.replace("```json", "").replace("```", "").strip()
         questions = json.loads(content)
         if isinstance(questions, list) and len(questions) == 5:
+            print(f"INFO: Successfully generated {len(questions)} AI questions")
             return questions
+        else:
+            print(f"WARNING: Unexpected response format: {questions}")
     except Exception as e:
-        print(f"Gemini API error (generate): {e}")
+        print(f"ERROR: Gemini API error (generate): {e}")
+        import traceback
+        print(traceback.format_exc())
 
+    print("WARNING: Falling back to hardcoded questions")
     return get_fallback_questions(domain, difficulty)
 
 async def evaluate_answer(question: str, answer: str, domain: str, difficulty: str,
@@ -110,7 +158,8 @@ async def evaluate_answer(question: str, answer: str, domain: str, difficulty: s
     filler_count, filler_list = count_filler_words(answer)
     wpm = calculate_wpm(answer, duration_seconds)
 
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "":
+    model = _get_gemini_model()
+    if not model:
         return get_fallback_evaluation(answer, filler_count, filler_list, wpm)
 
     prompt = f"""You are an expert interview evaluator for {domain} positions at {difficulty} level.
@@ -129,9 +178,6 @@ Evaluate this answer and return ONLY a JSON object exactly matching this schema:
 }}"""
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        # Move synchronous blocking call to thread pool
         response = await asyncio.to_thread(
             model.generate_content,
             prompt,
@@ -174,6 +220,16 @@ def get_fallback_evaluation(answer: str, filler_count: int, filler_list: List[st
     confidence = min(85, max(40, 65 - filler_count * 3))
     overall = round((technical + communication + confidence) / 3, 1)
 
+    # Dynamic feedback based on word count and quality
+    if word_count < 20:
+        feedback = "Your response was quite brief. In a real interview, try to expand more on your thought process and provide specific context."
+    elif filler_count > 5:
+        feedback = "You have the right ideas, but the delivery was slightly hindered by filler words. Focusing on steady pacing will make your points much more impactful."
+    elif word_count > 100:
+        feedback = "Excellent depth! You provided a very thorough explanation. Just ensure you keep the 'STAR' method in mind to keep your answers structured."
+    else:
+        feedback = "A solid, well-rounded answer. You covered the basics effectively. To reach the 'Expert' level, try to talk more about the specific outcomes of your actions."
+
     tips = []
     if filler_count > 3:
         tips.append(f"Reduce filler words — you used {filler_count} filler words. Practice pausing instead.")
@@ -191,11 +247,11 @@ def get_fallback_evaluation(answer: str, filler_count: int, filler_list: List[st
         "communication_score": round(communication, 1),
         "confidence_score": round(confidence, 1),
         "overall_score": overall,
-        "feedback": "Your answer demonstrates understanding of the topic. Consider adding more specific examples and quantifiable achievements to strengthen your response.",
+        "feedback": feedback,
         "filler_words": filler_count,
         "filler_word_list": list(set(filler_list)),
         "words_per_minute": wpm,
-        "improvement_tips": tips if tips else ["Keep practicing structured responses using the STAR method."]
+        "improvement_tips": tips
     }
 
 
@@ -271,6 +327,11 @@ def get_fallback_questions(domain: str, difficulty: str) -> List[str]:
             ]
         }
     }
-    return questions.get(domain, questions["Software Developer"]).get(
+    import random
+    base_questions = questions.get(domain, questions["Software Developer"]).get(
         difficulty, questions["Software Developer"]["Intermediate"]
     )
+    # Shuffle fallback questions so they aren't always in the same order
+    shuffled = list(base_questions)
+    random.shuffle(shuffled)
+    return shuffled

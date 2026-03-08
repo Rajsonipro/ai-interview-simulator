@@ -26,8 +26,9 @@ async def create_session(session: SessionCreate, db: Connection = Depends(get_db
     )
     db.commit()
     session_id = cursor.lastrowid
+    print(f"DEBUG: New session created: {session_id} for user {session.user_id}")
 
-    questions = await generate_questions(session.domain, session.difficulty, session.resume_text)
+    questions = await generate_questions(session.domain, session.difficulty, session.resume_text, session_id=session_id)
 
     return {
         "session_id": session_id,
