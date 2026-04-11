@@ -20,7 +20,7 @@ def send_verification_email(email: str, otp: str):
     print("="*50 + "\n")
 
 @router.post("/register", response_model=dict)
-def register(user: UserRegister, db: Connection = Depends(get_db)):
+async def register(user: UserRegister, db: Connection = Depends(get_db)):
     print(f"\n--- NEW REGISTRATION ATTEMPT ---")
     print(f"Data: username={user.username}, email={user.email}")
     
@@ -56,10 +56,18 @@ def register(user: UserRegister, db: Connection = Depends(get_db)):
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
-    send_verification_email(user.email, otp)
-    print("Verification email sent (log)")
-    
-    return {"message": "Registration successful. Please check your email for the verification code.", "email": user.email}
+    try:
+        from app.services.email_service import send_otp_email
+        await send_otp_email(user.email, otp)
+    except Exception as e:
+        print(f"EMAIL SEND ERROR: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Registration succeeded but the verification email could not be sent. Check your MAIL_USERNAME and MAIL_PASSWORD settings in .env."
+        )
+
+    print("Verification email sent")
+    return {"message": "Registration successful. Please check your Gmail for the verification code.", "email": user.email}
 
 @router.post("/verify-otp", response_model=TokenResponse)
 def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
@@ -76,18 +84,16 @@ def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
     # Handle string to datetime conversion if stored as TEXT in SQLite
     stored_expiry = user["otp_expiry"]
     if isinstance(stored_expiry, str):
-        # Handle potential formats or assume ISO
         try:
             stored_expiry = datetime.fromisoformat(stored_expiry.replace('Z', '+00:00'))
-        except:
-             pass
+        except Exception:
+            stored_expiry = None
 
     if user["verification_otp"] != data.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    # If otp_expiry is aware, compare directly. (Simplified for this mock)
-    # if stored_expiry < datetime.now(timezone.utc):
-    #    raise HTTPException(status_code=400, detail="OTP has expired")
+    if stored_expiry is not None and stored_expiry < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="OTP has expired. Please register again or request a new code.")
 
     cursor.execute("UPDATE users SET is_verified = 1, verification_otp = NULL, otp_expiry = NULL WHERE id = ?", (user["id"],))
     db.commit()
