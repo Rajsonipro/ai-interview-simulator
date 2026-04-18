@@ -5,7 +5,7 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const api = axios.create({
   baseURL: API_URL,
   headers: { 'Content-Type': 'application/json' },
-  timeout: 10000
+  timeout: 30000
 });
 
 api.interceptors.request.use((config) => {
@@ -26,6 +26,7 @@ export const authAPI = {
   register: (data) => api.post('/api/auth/register', data),
   login: (data) => api.post('/api/auth/login', data),
   verifyOtp: (data) => api.post('/api/auth/verify-otp', data),
+  resendOtp: (data) => api.post('/api/auth/resend-otp', data),
 };
 
 export const interviewAPI = {

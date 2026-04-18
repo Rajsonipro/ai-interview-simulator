@@ -10,6 +10,7 @@ export default function AuthPage() {
   const [showOtp, setShowOtp] = useState(false);
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [emailToVerify, setEmailToVerify] = useState('');
+  const [otpInfo, setOtpInfo] = useState('');
   
   useEffect(() => {
     setIsLogin(location.pathname === '/login');
@@ -52,15 +53,17 @@ export default function AuthPage() {
         login(response.data.access_token, response.data.user);
         navigate('/dashboard');
       } else {
-        await authAPI.register(form);
+        const response = await authAPI.register(form);
         setEmailToVerify(form.email);
+        setOtpInfo(response.data?.message || 'Verification code sent to your email.');
         setShowOtp(true);
       }
     } catch (err) {
       console.error(err);
       const apiError = err.response?.data?.detail;
-      if (apiError === 'Email not verified. Please verify your account.') {
+      if (apiError?.includes('Email not verified')) {
           setEmailToVerify(form.email);
+          setOtpInfo('A new verification code was sent to your email.');
           setShowOtp(true);
       } else {
         setError(apiError || 'Something went wrong. Please try again.');
@@ -97,6 +100,20 @@ export default function AuthPage() {
     }
   };
 
+  const handleResendOtp = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await authAPI.resendOtp({ email: emailToVerify });
+      setOtp(['', '', '', '', '', '']);
+      setOtpInfo(response.data?.message || 'Verification code sent again.');
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not resend code. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleChange = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
   if (showOtp) {
@@ -106,6 +123,7 @@ export default function AuthPage() {
             <div className="text-4xl mb-6">📧</div>
             <h2 className="text-2xl font-bold text-white mb-2">Verify your email</h2>
             <p className="text-slate-400 mb-8">Enter the 6-digit code sent to <br/><span className="text-primary-400 font-semibold">{emailToVerify}</span></p>
+            {otpInfo && <p className="text-emerald-400 text-sm mb-4">{otpInfo}</p>}
             
             <div className="flex justify-between gap-2 mb-8">
               {otp.map((data, index) => (
@@ -129,6 +147,13 @@ export default function AuthPage() {
               disabled={loading || otp.join('').length < 6}
             >
               {loading ? 'Verifying...' : 'Verify & Continue'}
+            </button>
+            <button
+              className="w-full border border-white/10 py-3 rounded-xl text-slate-300 hover:text-white hover:border-white/20 transition-colors mb-4"
+              onClick={handleResendOtp}
+              disabled={loading}
+            >
+              {loading ? 'Sending...' : 'Resend Code'}
             </button>
             <button className="text-slate-400 text-sm hover:text-white transition-colors" onClick={() => setShowOtp(false)}>
                 ← Back to Login

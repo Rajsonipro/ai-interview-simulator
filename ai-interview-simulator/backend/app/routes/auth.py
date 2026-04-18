@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlite3 import Connection, IntegrityError
 from app.database.db import get_db
-from app.models.schemas import UserRegister, UserLogin, TokenResponse, UserResponse, OTPVerify
+from app.models.schemas import UserRegister, UserLogin, TokenResponse, UserResponse, OTPVerify, EmailRequest
 from app.services.auth_service import (
     hash_password, verify_password, create_access_token, 
-    generate_otp, get_otp_expiry
+    generate_otp, get_otp_expiry, send_verification_email
 )
 from app.services.oauth_service import oauth
 from datetime import datetime, timezone
@@ -12,15 +12,20 @@ import os
 
 router = APIRouter()
 
-# Mock function for sending email. In production, use fastapi-mail or similar.
-def send_verification_email(email: str, otp: str):
-    print("\n" + "="*50)
-    print(f"VERIFICATION CODE FOR: {email}")
-    print(f"YOUR CODE IS: {otp}")
-    print("="*50 + "\n")
+def _parse_otp_expiry(otp_expiry_value):
+    if not otp_expiry_value:
+        return None
+    if isinstance(otp_expiry_value, datetime):
+        return otp_expiry_value
+    if isinstance(otp_expiry_value, str):
+        try:
+            return datetime.fromisoformat(otp_expiry_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 @router.post("/register", response_model=dict)
-async def register(user: UserRegister, db: Connection = Depends(get_db)):
+def register(user: UserRegister, db: Connection = Depends(get_db)):
     print(f"\n--- NEW REGISTRATION ATTEMPT ---")
     print(f"Data: username={user.username}, email={user.email}")
     
@@ -57,17 +62,15 @@ async def register(user: UserRegister, db: Connection = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
     try:
-        from app.services.email_service import send_otp_email
-        await send_otp_email(user.email, otp)
+        send_verification_email(user.email, otp)
     except Exception as e:
-        print(f"EMAIL SEND ERROR: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Registration succeeded but the verification email could not be sent. Check your MAIL_USERNAME and MAIL_PASSWORD settings in .env."
+            detail=f"Could not send verification email: {str(e)}"
         )
-
-    print("Verification email sent")
-    return {"message": "Registration successful. Please check your Gmail for the verification code.", "email": user.email}
+    print("Verification email sent (log)")
+    
+    return {"message": "Registration successful. Please check your email for the verification code.", "email": user.email}
 
 @router.post("/verify-otp", response_model=TokenResponse)
 def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
@@ -81,19 +84,13 @@ def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
     if user["is_verified"]:
         raise HTTPException(status_code=400, detail="User is already verified")
 
-    # Handle string to datetime conversion if stored as TEXT in SQLite
-    stored_expiry = user["otp_expiry"]
-    if isinstance(stored_expiry, str):
-        try:
-            stored_expiry = datetime.fromisoformat(stored_expiry.replace('Z', '+00:00'))
-        except Exception:
-            stored_expiry = None
+    stored_expiry = _parse_otp_expiry(user["otp_expiry"])
 
     if user["verification_otp"] != data.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
-    if stored_expiry is not None and stored_expiry < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="OTP has expired. Please register again or request a new code.")
+    if not stored_expiry or stored_expiry < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new code.")
 
     cursor.execute("UPDATE users SET is_verified = 1, verification_otp = NULL, otp_expiry = NULL WHERE id = ?", (user["id"],))
     db.commit()
@@ -121,8 +118,18 @@ def login(credentials: UserLogin, db: Connection = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not user["is_verified"]:
-        # Resend OTP logic could go here
-        raise HTTPException(status_code=403, detail="Email not verified. Please verify your account.")
+        otp = generate_otp()
+        otp_expiry = get_otp_expiry()
+        cursor.execute(
+            "UPDATE users SET verification_otp = ?, otp_expiry = ? WHERE id = ?",
+            (otp, otp_expiry, user["id"])
+        )
+        db.commit()
+        try:
+            send_verification_email(user["email"], otp)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unable to send verification code: {str(e)}")
+        raise HTTPException(status_code=403, detail="Email not verified. A new verification code was sent.")
 
     token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
     return TokenResponse(
@@ -136,6 +143,32 @@ def login(credentials: UserLogin, db: Connection = Depends(get_db)):
             avatar_url=user["avatar_url"]
         )
     )
+
+
+@router.post("/resend-otp", response_model=dict)
+def resend_otp(data: EmailRequest, db: Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = ?", (data.email,))
+    user = cursor.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user["is_verified"]:
+        raise HTTPException(status_code=400, detail="User is already verified")
+
+    otp = generate_otp()
+    otp_expiry = get_otp_expiry()
+    cursor.execute(
+        "UPDATE users SET verification_otp = ?, otp_expiry = ? WHERE id = ?",
+        (otp, otp_expiry, user["id"])
+    )
+    db.commit()
+
+    try:
+        send_verification_email(data.email, otp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to resend verification code: {str(e)}")
+
+    return {"message": "Verification code sent successfully"}
 
 # --- OAuth Routes ---
 

@@ -19,6 +19,10 @@ class OTPVerify(BaseModel):
     otp: str
 
 
+class EmailRequest(BaseModel):
+    email: str
+
+
 class UserResponse(BaseModel):
     id: int
     username: str
