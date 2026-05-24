@@ -1,76 +1,163 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlite3 import Connection, IntegrityError
 from app.database.db import get_db
-from app.models.schemas import UserRegister, UserLogin, TokenResponse, UserResponse, OTPVerify
-from app.services.auth_service import (
-    hash_password, verify_password, create_access_token, 
-    generate_otp, get_otp_expiry
+from app.models.schemas import (
+    UserRegister, UserLogin, OTPVerify, OTPResend,
+    ForgotPasswordRequest, ForgotPasswordVerify, ResetPassword,
+    AuthResponse, UserResponse
 )
-from app.services.oauth_service import oauth
+from app.services.auth_service import (
+    hash_password, verify_password, validate_password_strength,
+    generate_otp, get_otp_expiry, verify_otp_not_expired,
+    generate_session_token, get_session_expiry,
+    verify_session_token, invalidate_session,
+    create_oauth_session_token,
+    get_current_user, check_rate_limit,
+    MAX_OTP_ATTEMPTS
+)
+from app.services.email_service import send_otp_email
 from datetime import datetime, timezone
-import os
+import logging
+
+# Import OAuth clients (lazy-loaded)
+from app.services.oauth_service import get_oauth_clients
+import random
+import json
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-# Mock function for sending email. In production, use fastapi-mail or similar.
-def send_verification_email(email: str, otp: str):
-    print("\n" + "="*50)
-    print(f"VERIFICATION CODE FOR: {email}")
-    print(f"YOUR CODE IS: {otp}")
-    print("="*50 + "\n")
 
-@router.post("/register", response_model=dict)
-async def register(user: UserRegister, db: Connection = Depends(get_db)):
-    print(f"\n--- NEW REGISTRATION ATTEMPT ---")
-    print(f"Data: username={user.username}, email={user.email}")
-    
-    if len(user.password) < 6:
-        print("Error: Password too short")
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+# ═══════════════════════════════════════════════
+# REGISTER
+# ═══════════════════════════════════════════════
+
+@router.post("/register")
+async def register(
+    request: Request,
+    user: UserRegister,
+    db: Connection = Depends(get_db)
+):
+    """Register a new user with email and password. Sends OTP to email."""
+    # Rate limit: 3 registrations per IP per minute
+    check_rate_limit(request, "register", max_requests=3)
+
     if len(user.username) < 3:
-        print("Error: Username too short")
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
 
+    # Validate password strength
+    valid, msg = validate_password_strength(user.password)
+    if not valid:
+        raise HTTPException(status_code=400, detail=msg)
+
     try:
+        hashed = hash_password(user.password)
         otp = generate_otp()
         otp_expiry = get_otp_expiry()
-        hashed = hash_password(user.password)
-        print("Password hashed successfully")
-
         cursor = db.cursor()
         cursor.execute(
-            """INSERT INTO users (username, email, password_hash, verification_otp, otp_expiry, is_verified) 
+            """INSERT INTO users (username, email, password_hash, verification_otp, otp_expiry, is_verified)
                VALUES (?, ?, ?, ?, ?, 0)""",
             (user.username, user.email, hashed, otp, otp_expiry)
         )
         db.commit()
-        print(f"User saved to database. OTP: {otp}")
+        user_id = cursor.lastrowid
+        logger.info(f"User registered: ID={user_id}, email={user.email}")
     except IntegrityError as e:
-        print(f"Database Integrity Error: {str(e)}")
         if "email" in str(e):
             raise HTTPException(status_code=400, detail="Email already registered")
         raise HTTPException(status_code=400, detail="Username already taken")
-    except Exception as e:
-        print(f"REGISTRATION ERROR: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
+    # Send OTP via email
     try:
-        from app.services.email_service import send_otp_email
-        await send_otp_email(user.email, otp)
+        await send_otp_email(user.email, otp, purpose="verification")
     except Exception as e:
-        print(f"EMAIL SEND ERROR: {e}")
+        logger.error(f"Failed to send verification email: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Registration succeeded but the verification email could not be sent. Check your MAIL_USERNAME and MAIL_PASSWORD settings in .env."
+            detail="Registration successful but failed to send verification email. Please check your SMTP settings."
         )
 
-    print("Verification email sent")
-    return {"message": "Registration successful. Please check your Gmail for the verification code.", "email": user.email}
+    return {
+        "message": "Registration successful! Please check your email for the verification code.",
+        "email": user.email
+    }
 
-@router.post("/verify-otp", response_model=TokenResponse)
-def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
+
+# ═══════════════════════════════════════════════
+# LOGIN (password-based)
+# ═══════════════════════════════════════════════
+
+@router.post("/login", response_model=AuthResponse)
+async def login(
+    request: Request,
+    credentials: UserLogin,
+    db: Connection = Depends(get_db)
+):
+    """Authenticate user with email and password."""
+    # Rate limit: 5 login attempts per IP per minute
+    check_rate_limit(request, "login", max_requests=5)
+
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = ?", (credentials.email,))
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Check password
+    if not verify_password(credentials.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Check if email is verified
+    if not user["is_verified"]:
+        # Generate new OTP and resend
+        otp = generate_otp()
+        otp_expiry = get_otp_expiry()
+        cursor.execute(
+            "UPDATE users SET verification_otp = ?, otp_expiry = ?, otp_attempts = 0 WHERE id = ?",
+            (otp, otp_expiry, user["id"])
+        )
+        db.commit()
+        try:
+            await send_otp_email(user["email"], otp, purpose="verification")
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=403,
+            detail="Email not verified. A new verification code has been sent to your email."
+        )
+
+    # Create session
+    session_token = generate_session_token()
+    session_expiry = get_session_expiry()
+    cursor.execute(
+        "UPDATE users SET session_token = ?, session_expiry = ? WHERE id = ?",
+        (session_token, session_expiry, user["id"])
+    )
+    db.commit()
+
+    user_dict = dict(cursor.execute(
+        "SELECT id, username, email, is_verified, avatar_url, google_id, github_id FROM users WHERE id = ?",
+        (user["id"],)
+    ).fetchone())
+
+    return AuthResponse(session_token=session_token, user=UserResponse(**user_dict))
+
+
+# ═══════════════════════════════════════════════
+# VERIFY OTP (after registration)
+# ═══════════════════════════════════════════════
+
+@router.post("/verify-otp", response_model=AuthResponse)
+async def verify_otp(
+    request: Request,
+    data: OTPVerify,
+    db: Connection = Depends(get_db)
+):
+    """Verify OTP sent during registration."""
+    check_rate_limit(request, "verify_otp", max_requests=5)
+
     cursor = db.cursor()
     cursor.execute("SELECT * FROM users WHERE email = ?", (data.email,))
     user = cursor.fetchone()
@@ -79,192 +166,426 @@ def verify_otp(data: OTPVerify, db: Connection = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
 
     if user["is_verified"]:
-        raise HTTPException(status_code=400, detail="User is already verified")
+        raise HTTPException(status_code=400, detail="Email already verified")
 
-    # Handle string to datetime conversion if stored as TEXT in SQLite
-    stored_expiry = user["otp_expiry"]
-    if isinstance(stored_expiry, str):
-        try:
-            stored_expiry = datetime.fromisoformat(stored_expiry.replace('Z', '+00:00'))
-        except Exception:
-            stored_expiry = None
+    # Check OTP attempts
+    if user["otp_attempts"] >= MAX_OTP_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many incorrect attempts. Please request a new OTP."
+        )
 
+    # Verify OTP
     if user["verification_otp"] != data.otp:
-        raise HTTPException(status_code=400, detail="Invalid OTP")
+        cursor.execute(
+            "UPDATE users SET otp_attempts = otp_attempts + 1 WHERE id = ?",
+            (user["id"],)
+        )
+        db.commit()
+        remaining = MAX_OTP_ATTEMPTS - (user["otp_attempts"] + 1)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid OTP. {max(0, remaining)} attempt(s) remaining."
+        )
 
-    if stored_expiry is not None and stored_expiry < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="OTP has expired. Please register again or request a new code.")
+    # Check expiry
+    if not verify_otp_not_expired(user["otp_expiry"]):
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
 
-    cursor.execute("UPDATE users SET is_verified = 1, verification_otp = NULL, otp_expiry = NULL WHERE id = ?", (user["id"],))
+    # Verify user and create session
+    session_token = generate_session_token()
+    session_expiry = get_session_expiry()
+    cursor.execute(
+        """UPDATE users SET is_verified = 1, verification_otp = NULL, otp_expiry = NULL,
+           otp_attempts = 0, session_token = ?, session_expiry = ? WHERE id = ?""",
+        (session_token, session_expiry, user["id"])
+    )
     db.commit()
 
-    token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        user=UserResponse(
-            id=user["id"], 
-            username=user["username"], 
-            email=user["email"], 
-            is_verified=True,
-            avatar_url=user["avatar_url"]
-        )
-    )
+    user_dict = dict(cursor.execute(
+        "SELECT id, username, email, is_verified, avatar_url, google_id, github_id FROM users WHERE id = ?",
+        (user["id"],)
+    ).fetchone())
 
-@router.post("/login", response_model=TokenResponse)
-def login(credentials: UserLogin, db: Connection = Depends(get_db)):
+    return AuthResponse(session_token=session_token, user=UserResponse(**user_dict))
+
+
+# ═══════════════════════════════════════════════
+# RESEND OTP
+# ═══════════════════════════════════════════════
+
+@router.post("/resend-otp")
+async def resend_otp(
+    request: Request,
+    data: OTPResend,
+    db: Connection = Depends(get_db)
+):
+    """Resend a new verification OTP to the user's email."""
+    check_rate_limit(request, "resend_otp", max_requests=2, window=120)  # 2 per 2 minutes
+
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM users WHERE email = ?", (credentials.email,))
+    cursor.execute("SELECT id, is_verified FROM users WHERE email = ?", (data.email,))
     user = cursor.fetchone()
 
-    if not user or not verify_password(credentials.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user:
+        raise HTTPException(status_code=404, detail="Email not found. Please register first.")
 
-    if not user["is_verified"]:
-        # Resend OTP logic could go here
-        raise HTTPException(status_code=403, detail="Email not verified. Please verify your account.")
+    if user["is_verified"]:
+        raise HTTPException(status_code=400, detail="Email already verified. Please log in.")
 
-    token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
-        user=UserResponse(
-            id=user["id"], 
-            username=user["username"], 
-            email=user["email"], 
-            is_verified=bool(user["is_verified"]),
-            avatar_url=user["avatar_url"]
-        )
+    otp = generate_otp()
+    otp_expiry = get_otp_expiry()
+    cursor.execute(
+        "UPDATE users SET verification_otp = ?, otp_expiry = ?, otp_attempts = 0 WHERE email = ?",
+        (otp, otp_expiry, data.email)
     )
+    db.commit()
 
-# --- OAuth Routes ---
+    try:
+        await send_otp_email(data.email, otp, purpose="verification")
+    except Exception as e:
+        logger.error(f"Failed to resend OTP: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send OTP. Please try again later.")
+
+    return {"message": "A new OTP has been sent to your email.", "email": data.email}
+
+
+# ═══════════════════════════════════════════════
+# FORGOT PASSWORD - Request OTP
+# ═══════════════════════════════════════════════
+
+@router.post("/forgot-password")
+async def forgot_password(
+    request: Request,
+    data: ForgotPasswordRequest,
+    db: Connection = Depends(get_db)
+):
+    """Send a password reset OTP to the user's email."""
+    check_rate_limit(request, "forgot_password", max_requests=2, window=120)
+
+    cursor = db.cursor()
+    cursor.execute("SELECT id, username FROM users WHERE email = ?", (data.email,))
+    user = cursor.fetchone()
+
+    if not user:
+        # Don't reveal if email exists - return generic message
+        return {"message": "If this email is registered, you will receive a password reset code.", "email": data.email}
+
+    otp = generate_otp()
+    otp_expiry = get_otp_expiry()
+    cursor.execute(
+        "UPDATE users SET forgot_password_otp = ?, forgot_otp_expiry = ?, forgot_otp_attempts = 0 WHERE id = ?",
+        (otp, otp_expiry, user["id"])
+    )
+    db.commit()
+
+    try:
+        await send_otp_email(data.email, otp, purpose="forgot_password")
+    except Exception as e:
+        logger.error(f"Failed to send forgot password email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send reset code. Please try again later.")
+
+    return {"message": "If this email is registered, you will receive a password reset code.", "email": data.email}
+
+
+# ═══════════════════════════════════════════════
+# VERIFY FORGOT PASSWORD OTP
+# ═══════════════════════════════════════════════
+
+@router.post("/verify-forgot-otp")
+async def verify_forgot_otp(
+    request: Request,
+    data: ForgotPasswordVerify,
+    db: Connection = Depends(get_db)
+):
+    """Verify the forgot password OTP."""
+    check_rate_limit(request, "verify_forgot", max_requests=5)
+
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT id, forgot_password_otp, forgot_otp_expiry, forgot_otp_attempts FROM users WHERE email = ?",
+        (data.email,)
+    )
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user["forgot_password_otp"]:
+        raise HTTPException(status_code=400, detail="No password reset requested. Please request a reset first.")
+
+    # Check attempts
+    if user["forgot_otp_attempts"] >= MAX_OTP_ATTEMPTS:
+        cursor.execute(
+            "UPDATE users SET forgot_password_otp = NULL, forgot_otp_expiry = NULL, forgot_otp_attempts = 0, forgot_otp_verified = 0 WHERE id = ?",
+            (user["id"],)
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=429,
+            detail="Too many incorrect attempts. Please request a new reset code."
+        )
+
+    # Verify OTP
+    if user["forgot_password_otp"] != data.otp:
+        cursor.execute(
+            "UPDATE users SET forgot_otp_attempts = forgot_otp_attempts + 1 WHERE id = ?",
+            (user["id"],)
+        )
+        db.commit()
+        remaining = MAX_OTP_ATTEMPTS - (user["forgot_otp_attempts"] + 1)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid reset code. {max(0, remaining)} attempt(s) remaining."
+        )
+
+    # Check expiry
+    if not verify_otp_not_expired(user["forgot_otp_expiry"]):
+        raise HTTPException(status_code=400, detail="Reset code has expired. Please request a new one.")
+
+    # Mark OTP as verified for the subsequent reset-password call
+    cursor.execute(
+        "UPDATE users SET forgot_otp_verified = 1 WHERE id = ?",
+        (user["id"],)
+    )
+    db.commit()
+
+    return {"message": "Code verified successfully. You can now reset your password.", "email": data.email}
+
+
+# ═══════════════════════════════════════════════
+# RESET PASSWORD
+# ═══════════════════════════════════════════════
+
+@router.post("/reset-password")
+async def reset_password(
+    request: Request,
+    data: ResetPassword,
+    db: Connection = Depends(get_db)
+):
+    """Reset the password after OTP verification."""
+    check_rate_limit(request, "reset_password", max_requests=3)
+
+    # Validate new password
+    valid, msg = validate_password_strength(data.new_password)
+    if not valid:
+        raise HTTPException(status_code=400, detail=msg)
+
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT id, forgot_password_otp, forgot_otp_expiry, forgot_otp_verified FROM users WHERE email = ?",
+        (data.email,)
+    )
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user["forgot_password_otp"]:
+        raise HTTPException(status_code=400, detail="No password reset requested. Please request a reset first.")
+
+    if not user["forgot_otp_verified"]:
+        raise HTTPException(status_code=400, detail="Reset code not verified. Please verify the OTP first.")
+
+    # Verify OTP one more time
+    if user["forgot_password_otp"] != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid reset code")
+
+    if not verify_otp_not_expired(user["forgot_otp_expiry"]):
+        raise HTTPException(status_code=400, detail="Reset code has expired. Please request a new one.")
+
+    # Hash new password and update
+    new_hashed = hash_password(data.new_password)
+    cursor.execute(
+        """UPDATE users SET password_hash = ?, forgot_password_otp = NULL, forgot_otp_expiry = NULL,
+           forgot_otp_attempts = 0, forgot_otp_verified = 0, session_token = NULL, session_expiry = NULL WHERE id = ?""",
+        (new_hashed, user["id"])
+    )
+    db.commit()
+
+    logger.info(f"Password reset successful for user ID={user['id']}")
+
+    return {"message": "Password has been reset successfully. Please log in with your new password."}
+
+
+# ═══════════════════════════════════════════════
+# LOGOUT
+# ═══════════════════════════════════════════════
+
+@router.post("/logout")
+async def logout(
+    current_user: UserResponse = Depends(get_current_user),
+    db: Connection = Depends(get_db)
+):
+    """Logout by invalidating the current session."""
+    invalidate_session(db, current_user.id)
+    return {"message": "Logged out successfully"}
+
+
+# ═══════════════════════════════════════════════
+# GET CURRENT USER
+# ═══════════════════════════════════════════════
+
+@router.get("/me", response_model=UserResponse)
+async def get_me(current_user: UserResponse = Depends(get_current_user)):
+    """Get the currently authenticated user's profile."""
+    return current_user
+
+
+# ═══════════════════════════════════════════════
+# SOCIAL LOGIN - Google & GitHub
+# ═══════════════════════════════════════════════
 
 @router.get("/oauth/{provider}")
 async def oauth_login(provider: str, request: Request):
-    if provider not in ['google', 'github', 'facebook']:
-        raise HTTPException(status_code=400, detail="Invalid OAuth provider")
-    
-    print(f"DEBUG: Attempting login for provider: {provider}")
-    print(f"DEBUG: Registered clients: {list(oauth._clients.keys())}")
-    
+    """Initiate OAuth login with Google or GitHub."""
+    if provider not in ("google", "github"):
+        raise HTTPException(status_code=400, detail="Invalid OAuth provider. Supported: google, github")
+
+    oauth = get_oauth_clients()
     client = oauth.create_client(provider)
     if not client:
         raise HTTPException(
-            status_code=400, 
-            detail=f"{provider.capitalize()} login is not configured (Registered: {list(oauth._clients.keys())}). Please add your Client ID and Secret to the .env file."
+            status_code=400,
+            detail=f"{provider.capitalize()} OAuth is not configured. Check your .env file for {provider.upper()}_CLIENT_ID and {provider.upper()}_CLIENT_SECRET."
         )
-    
-    redirect_uri = request.url_for('auth_callback', provider=provider)
-    # On many localhost setups, redirect_uri needs to be forced to http if using dev servers
-    # redirect_uri = redirect_uri.replace('https', 'http') 
-    
-    return await oauth.create_client(provider).authorize_redirect(request, str(redirect_uri))
 
-@router.get("/callback/{provider}", name="auth_callback")
-async def auth_callback(provider: str, request: Request, db: Connection = Depends(get_db)):
+    redirect_uri = str(request.url_for("oauth_callback", provider=provider))
+    return await client.authorize_redirect(request, redirect_uri)
+
+
+@router.get("/callback/{provider}", name="oauth_callback")
+async def oauth_callback(provider: str, request: Request, db: Connection = Depends(get_db)):
+    """Handle OAuth callback from Google or GitHub."""
+    if provider not in ("google", "github"):
+        raise HTTPException(status_code=400, detail="Invalid OAuth provider")
+
+    oauth = get_oauth_clients()
     client = oauth.create_client(provider)
     if not client:
-        raise HTTPException(status_code=400, detail="Invalid OAuth provider")
-    
-    token = await client.authorize_access_token(request)
-    
-    if provider == 'google':
-        user_info = token.get('userinfo')
-        email = user_info.get('email')
-        name = user_info.get('name') or user_info.get('given_name', 'User')
-        avatar = user_info.get('picture')
-        pid_key = 'google_id'
-        pid_val = user_info.get('sub')
-    elif provider == 'github':
-        resp = await client.get('user', token=token)
-        user_info = resp.json()
-        name = user_info.get('name') or user_info.get('login')
-        avatar = user_info.get('avatar_url')
-        pid_key = 'github_id'
-        pid_val = str(user_info.get('id'))
-        
-        # GitHub might not return email in primary user fetch if private
-        email = user_info.get('email')
-        if not email:
-            email_resp = await client.get('user/emails', token=token)
-            emails = email_resp.json()
-            # Find primary verified email
-            email = next((e['email'] for e in emails if e['primary']), emails[0]['email'] if emails else None)
-    elif provider == 'facebook':
-        resp = await client.get('me?fields=id,name,email,picture', token=token)
-        user_info = resp.json()
-        email = user_info.get('email')
-        name = user_info.get('name')
-        avatar = user_info.get('picture', {}).get('data', {}).get('url')
-        pid_key = 'facebook_id'
-        pid_val = user_info.get('id')
-    
+        raise HTTPException(status_code=400, detail=f"{provider.capitalize()} OAuth not configured")
+
+    try:
+        token = await client.authorize_access_token(request)
+    except Exception as e:
+        logger.error(f"OAuth token error: {e}")
+        raise HTTPException(status_code=400, detail="Failed to authenticate with provider")
+
+    # Extract user info
+    email = None
+    name = None
+    avatar = None
+    provider_id = None
+
+    if provider == "google":
+        userinfo = token.get("userinfo")
+        if userinfo:
+            email = userinfo.get("email")
+            name = userinfo.get("name") or userinfo.get("given_name", "User")
+            avatar = userinfo.get("picture")
+            provider_id = userinfo.get("sub")
+    elif provider == "github":
+        try:
+            resp = await client.get("user", token=token)
+            userinfo = resp.json()
+            name = userinfo.get("name") or userinfo.get("login")
+            avatar = userinfo.get("avatar_url")
+            provider_id = str(userinfo.get("id"))
+            # GitHub might not return email
+            email = userinfo.get("email")
+            if not email:
+                email_resp = await client.get("user/emails", token=token)
+                emails = email_resp.json()
+                primary = [e for e in emails if e.get("primary") and e.get("verified")]
+                email = primary[0]["email"] if primary else (emails[0]["email"] if emails else None)
+        except Exception as e:
+            logger.error(f"GitHub userinfo error: {e}")
+            raise HTTPException(status_code=400, detail="Failed to get user info from GitHub")
+
     if not email:
-        raise HTTPException(status_code=400, detail="Could not retrieve email from provider")
+        raise HTTPException(status_code=400, detail=f"Could not retrieve email from {provider}")
 
     cursor = db.cursor()
+
     # Check if user exists by email
     cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
-    user = cursor.fetchone()
+    existing_user = cursor.fetchone()
 
-    if user:
-        # Update social ID if missing
-        if not user[pid_key]:
-            cursor.execute(f"UPDATE users SET {pid_key} = ?, avatar_url = ? WHERE id = ?", (pid_val, avatar, user["id"]))
-            db.commit()
+    if existing_user:
+        # Link OAuth account if not already linked
+        if provider == "google" and not existing_user["google_id"]:
+            cursor.execute("UPDATE users SET google_id = ?, avatar_url = ? WHERE id = ?",
+                          (provider_id, avatar, existing_user["id"]))
+        elif provider == "github" and not existing_user["github_id"]:
+            cursor.execute("UPDATE users SET github_id = ?, avatar_url = ? WHERE id = ?",
+                          (provider_id, avatar, existing_user["id"]))
+
+        # Update avatar if not set
+        if not existing_user["avatar_url"] and avatar:
+            cursor.execute("UPDATE users SET avatar_url = ? WHERE id = ?", (avatar, existing_user["id"]))
+
+        db.commit()
+        user_id = existing_user["id"]
+        username = existing_user["username"]
     else:
         # Create new user
+        username = name or email.split("@")[0]
+        # Make username unique by appending random suffix if needed
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            username = f"{username}_{random_suffix()}"
+
+        id_field = "google_id" if provider == "google" else "github_id"
         cursor.execute(
-            f"INSERT INTO users (username, email, {pid_key}, avatar_url, is_verified) VALUES (?, ?, ?, ?, 1)",
-            (name, email, pid_val, avatar)
+            f"INSERT INTO users (username, email, {id_field}, avatar_url, is_verified) VALUES (?, ?, ?, ?, 1)",
+            (username, email, provider_id, avatar)
         )
         db.commit()
-        cursor.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,))
-        user = cursor.fetchone()
+        user_id = cursor.lastrowid
 
-    # Create JWT
-    jwt_token = create_access_token({"sub": str(user["id"]), "email": user["email"]})
-    
-    # In a real app, you might redirect to a frontend URL with the token
-    # But for an API response, we'll return a HTML that tells the opener window the token
+    # Create session token
+    session_token = create_oauth_session_token(db, user_id)
+
+    # Get user data for response
+    cursor.execute(
+        "SELECT id, username, email, is_verified, avatar_url, google_id, github_id FROM users WHERE id = ?",
+        (user_id,)
+    )
+    user_dict = dict(cursor.fetchone())
+
+    # Return HTML page that posts the session token back to the opener window
     return f"""
     <html>
-        <script>
-            window.opener.postMessage({{
-                token: "{jwt_token}",
-                user: {{"id": {user["id"]}, "username": "{user["username"]}", "email": "{user["email"]}", "avatar_url": "{user["avatar_url"]}"}}
-            }}, "*");
-            window.close();
-        </script>
-        <body>Login successful. Processing...</body>
+    <head><title>Login Successful</title></head>
+    <body style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#030712;font-family:sans-serif;color:white;">
+      <div style="text-align:center;">
+        <div style="font-size:48px;margin-bottom:16px;">✅</div>
+        <h2>Login Successful!</h2>
+        <p style="color:#94a3b8;">You can close this window.</p>
+      </div>
+      <script>
+        const data = {{
+          session_token: "{session_token}",
+          user: {json.dumps(user_dict)}
+        }};
+        if (window.opener) {{
+          window.opener.postMessage(data, "*");
+          window.close();
+        }} else {{
+          window.location.href = "/oauth/success?session_token={session_token}";
+        }}
+      </script>
+    </body>
     </html>
     """
 
-@router.get("/me")
-def get_me(request: Request, db: Connection = Depends(get_db)):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    token = auth_header.split(" ")[1]
-    from app.services.auth_service import decode_token
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-    cursor = db.cursor()
-    cursor.execute("SELECT * FROM users WHERE id = ?", (payload["sub"],))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-        
-    return UserResponse(
-        id=user["id"], 
-        username=user["username"], 
-        email=user["email"], 
-        is_verified=bool(user["is_verified"]),
-        avatar_url=user["avatar_url"],
-        google_id=user["google_id"],
-        github_id=user["github_id"],
-        facebook_id=user["facebook_id"]
-    )
+
+@router.get("/oauth/success")
+async def oauth_success(session_token: str = ""):
+    """Fallback page for OAuth success when popup is blocked."""
+    return {"message": "Login successful", "session_token": session_token}
+
+
+def random_suffix(length: int = 6) -> str:
+    """Generate a random alphanumeric suffix."""
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))

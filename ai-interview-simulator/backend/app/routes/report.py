@@ -1,12 +1,13 @@
 from fastapi import APIRouter, HTTPException, Depends
 from sqlite3 import Connection
 from app.database.db import get_db
+from app.services.auth_service import get_current_user
 
 router = APIRouter()
 
 
 @router.get("/session/{session_id}")
-def get_session_report(session_id: int, db: Connection = Depends(get_db)):
+def get_session_report(session_id: int, current_user: dict = Depends(get_current_user), db: Connection = Depends(get_db)): 
     cursor = db.cursor()
 
     cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -62,8 +63,8 @@ def get_session_report(session_id: int, db: Connection = Depends(get_db)):
     }
 
 
-@router.get("/user/{user_id}/stats")
-def get_user_stats(user_id: int, db: Connection = Depends(get_db)):
+@router.get("/user/stats")
+def get_user_stats(current_user: dict = Depends(get_current_user), db: Connection = Depends(get_db)): 
     cursor = db.cursor()
     cursor.execute("""
         SELECT 
@@ -77,6 +78,6 @@ def get_user_stats(user_id: int, db: Connection = Depends(get_db)):
         FROM sessions s
         LEFT JOIN interview_responses ir ON s.id = ir.session_id
         WHERE s.user_id = ?
-    """, (user_id,))
+    """, (current_user['id'],))
     stats = cursor.fetchone()
     return dict(stats) if stats else {}

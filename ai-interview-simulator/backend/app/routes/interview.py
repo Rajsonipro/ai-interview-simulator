@@ -5,12 +5,15 @@ import PyPDF2
 from app.database.db import get_db
 from app.models.schemas import SessionCreate, AnswerSubmit, QuestionsResponse
 from app.services.ai_service import generate_questions, evaluate_answer
+from app.services.auth_service import get_current_user
+from app.models.schemas import SessionCreate
 
 router = APIRouter()
 
 
 @router.post("/session", response_model=dict)
-async def create_session(session: SessionCreate, db: Connection = Depends(get_db)):
+async def create_session(session: SessionCreate, current_user: dict = Depends(get_current_user), db: Connection = Depends(get_db)): 
+    session.user_id = current_user.id
     valid_domains = ["Software Developer", "HR", "Marketing"]
     valid_difficulties = ["Beginner", "Intermediate", "Advanced"]
 
@@ -39,7 +42,8 @@ async def create_session(session: SessionCreate, db: Connection = Depends(get_db
 
 
 @router.post("/evaluate", response_model=dict)
-async def evaluate_response(submission: AnswerSubmit, db: Connection = Depends(get_db)):
+async def evaluate_response(submission: AnswerSubmit, current_user: dict = Depends(get_current_user), db: Connection = Depends(get_db)): 
+    submission.user_id = current_user.id
     if not submission.answer or len(submission.answer.strip()) < 5:
         raise HTTPException(status_code=400, detail="Answer is too short to evaluate")
 
@@ -114,8 +118,8 @@ async def upload_resume(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error parsing file: {str(e)}")
 
 
-@router.get("/history/{user_id}")
-def get_user_history(user_id: int, db: Connection = Depends(get_db)):
+@router.get("/history")
+def get_user_history(current_user: dict = Depends(get_current_user), db: Connection = Depends(get_db)): 
     cursor = db.cursor()
     cursor.execute("""
         SELECT s.id as session_id, s.domain, s.difficulty, s.created_at,
@@ -127,6 +131,6 @@ def get_user_history(user_id: int, db: Connection = Depends(get_db)):
         GROUP BY s.id
         ORDER BY s.created_at DESC
         LIMIT 10
-    """, (user_id,))
+    """, (current_user.id,))
     sessions = cursor.fetchall()
     return {"history": [dict(s) for s in sessions]}

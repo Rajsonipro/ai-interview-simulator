@@ -24,13 +24,53 @@ def init_db():
             is_verified INTEGER DEFAULT 0,
             verification_otp TEXT,
             otp_expiry TIMESTAMP,
-            avatar_url TEXT,
+            otp_attempts INTEGER DEFAULT 0,
+            session_token TEXT,
+            session_expiry TIMESTAMP,
+            forgot_password_otp TEXT,
+            forgot_otp_expiry TIMESTAMP,
+            forgot_otp_attempts INTEGER DEFAULT 0,
+            forgot_otp_verified INTEGER DEFAULT 0,
             google_id TEXT UNIQUE,
             github_id TEXT UNIQUE,
-            facebook_id TEXT UNIQUE,
+            avatar_url TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Add missing columns if they don't exist (for migrations)
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN otp_attempts INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN forgot_password_otp TEXT")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN forgot_otp_expiry TIMESTAMP")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN forgot_otp_attempts INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN forgot_otp_verified INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN google_id TEXT UNIQUE")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN github_id TEXT UNIQUE")
+    except:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sessions (

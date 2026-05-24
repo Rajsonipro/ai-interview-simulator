@@ -1,13 +1,1 @@
-# Authentication Enhancement TODO
-
-## Plan Breakdown:
-1. [x] Create TODO.md
-2. [x] Delete backend/.env file (not present)
-3. [x] Verify existing auth flow (OTP on register/mock console print, verify to login) - confirmed & tested (mock not real email)
-4. [ ] Test backend endpoints (/register, /verify-otp, /login)
-5. [ ] [Optional] Add resend-OTP endpoint and update frontend login flow
-6. [ ] [Optional] Implement real email sending with SMTP
-7. [ ] Complete task
-
-Updated as steps complete.
-
+- [x] 1. Create backend .env ✅&#10;- [x] 2. Backend: pip install requirements.txt ✅&#10;- [x] 3. Start backend server (http://localhost:8000) 🔄 (check /docs, ignore import errors - restart if needed)&#10;- [x] 4. Create frontend .env ✅&#10;- [x] 5. Frontend: npm install ✅&#10;- [x] 6. Frontend dev server running (http://localhost:5173/ - Vite default port) ✅

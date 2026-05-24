@@ -1,12 +1,12 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime
 
 
 class UserRegister(BaseModel):
-    username: str
-    email: str
-    password: str
+    username: str = Field(..., min_length=3, max_length=50)
+    email: str = Field(..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+    password: str = Field(..., min_length=8, max_length=128)
 
 
 class UserLogin(BaseModel):
@@ -14,9 +14,32 @@ class UserLogin(BaseModel):
     password: str
 
 
+class OTPRequest(BaseModel):
+    email: str
+
+
 class OTPVerify(BaseModel):
     email: str
-    otp: str
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+class OTPResend(BaseModel):
+    email: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ForgotPasswordVerify(BaseModel):
+    email: str
+    otp: str = Field(..., min_length=6, max_length=6)
+
+
+class ResetPassword(BaseModel):
+    email: str
+    otp: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=8, max_length=128)
 
 
 class UserResponse(BaseModel):
@@ -27,12 +50,10 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str] = None
     google_id: Optional[str] = None
     github_id: Optional[str] = None
-    facebook_id: Optional[str] = None
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
+class AuthResponse(BaseModel):
+    session_token: str
     user: UserResponse
 
 

@@ -4,19 +4,19 @@ const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
-  const [token, setToken] = useState(null)
+  const [session_token, setSessionToken] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     try {
-      const savedToken = localStorage.getItem('token')
+      const savedSessionToken = localStorage.getItem('session_token')
       const savedUser = localStorage.getItem('user')
-      if (savedToken && savedUser) {
+      if (savedSessionToken && savedUser) {
         const parsedUser = JSON.parse(savedUser);
         if (typeof parsedUser !== 'object' || parsedUser === null) {
           throw new Error('Invalid user data');
         }
-        setToken(savedToken)
+        setSessionToken(savedSessionToken)
         setUser(parsedUser)
       }
     } catch (err) {
@@ -28,22 +28,22 @@ export function AuthProvider({ children }) {
     }
   }, [])
 
-  const login = (tokenValue, userData) => {
-    setToken(tokenValue)
+  const login = (sessionTokenValue, userData) => {
+    setSessionToken(sessionTokenValue)
     setUser(userData)
-    localStorage.setItem('token', tokenValue)
+    localStorage.setItem('session_token', sessionTokenValue)
     localStorage.setItem('user', JSON.stringify(userData))
   }
 
   const logout = () => {
-    setToken(null)
+    setSessionToken(null)
     setUser(null)
-    localStorage.removeItem('token')
+    localStorage.removeItem('session_token')
     localStorage.removeItem('user')
   }
 
   return (
-    <AuthContext.Provider value={{ user, token, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, session_token, login, logout, loading }}>
       {children}
     </AuthContext.Provider>
   )

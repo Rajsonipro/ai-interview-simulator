@@ -1,53 +1,53 @@
-from authlib.integrations.starlette_client import OAuth
 import os
 import logging
 from dotenv import load_dotenv
+from authlib.integrations.starlette_client import OAuth
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
-FACEBOOK_CLIENT_ID = os.getenv("FACEBOOK_CLIENT_ID")
-FACEBOOK_CLIENT_SECRET = os.getenv("FACEBOOK_CLIENT_SECRET")
+_oauth = None
 
-oauth = OAuth()
 
-logger.info(f"OAUTH: GOOGLE_CLIENT_ID: {GOOGLE_CLIENT_ID[:10] if GOOGLE_CLIENT_ID else 'None'}...")
-if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
-    logger.info("OAUTH: Registering Google...")
-    oauth.register(
-        name='google',
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
-        client_kwargs={'scope': 'openid email profile'}
-    )
+def get_oauth_clients() -> OAuth:
+    """Get or create the OAuth instance with configured providers."""
+    global _oauth
+    if _oauth is not None:
+        return _oauth
 
-if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
-    oauth.register(
-        name='github',
-        client_id=GITHUB_CLIENT_ID,
-        client_secret=GITHUB_CLIENT_SECRET,
-        access_token_url='https://github.com/login/oauth/access_token',
-        access_token_params=None,
-        authorize_url='https://github.com/login/oauth/authorize',
-        authorize_params=None,
-        api_base_url='https://api.github.com/',
-        client_kwargs={'scope': 'user:email'},
-    )
+    _oauth = OAuth()
 
-if FACEBOOK_CLIENT_ID and FACEBOOK_CLIENT_SECRET:
-    oauth.register(
-        name='facebook',
-        client_id=FACEBOOK_CLIENT_ID,
-        client_secret=FACEBOOK_CLIENT_SECRET,
-        access_token_url='https://graph.facebook.com/v12.0/oauth/access_token',
-        authorize_url='https://www.facebook.com/v12.0/dialog/oauth',
-        api_base_url='https://graph.facebook.com/',
-        client_kwargs={'scope': 'email'},
-    )
+    # Google
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    if google_client_id and google_client_secret:
+        _oauth.register(
+            name="google",
+            client_id=google_client_id,
+            client_secret=google_client_secret,
+            server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+            client_kwargs={"scope": "openid email profile"},
+        )
+        logger.info("Google OAuth configured")
+    else:
+        logger.warning("Google OAuth not configured (missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET)")
+
+    # GitHub
+    github_client_id = os.getenv("GITHUB_CLIENT_ID")
+    github_client_secret = os.getenv("GITHUB_CLIENT_SECRET")
+    if github_client_id and github_client_secret:
+        _oauth.register(
+            name="github",
+            client_id=github_client_id,
+            client_secret=github_client_secret,
+            access_token_url="https://github.com/login/oauth/access_token",
+            authorize_url="https://github.com/login/oauth/authorize",
+            api_base_url="https://api.github.com/",
+            client_kwargs={"scope": "user:email"},
+        )
+        logger.info("GitHub OAuth configured")
+    else:
+        logger.warning("GitHub OAuth not configured (missing GITHUB_CLIENT_ID or GITHUB_CLIENT_SECRET)")
+
+    return _oauth
