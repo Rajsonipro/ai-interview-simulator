@@ -1,6 +1,22 @@
+<<<<<<< HEAD
 import random
 import string
 import time
+=======
+import os
+import jwt
+import random
+import string
+import smtplib
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from typing import Optional
+
+SECRET_KEY = os.getenv("SECRET_KEY", "ai-interview-simulator-secret-key-2024")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_HOURS = 24
+
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 import bcrypt
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
@@ -97,6 +113,7 @@ def get_otp_expiry(minutes: int = OTP_EXPIRE_MINUTES) -> datetime:
     return datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
 
+<<<<<<< HEAD
 def verify_otp_not_expired(expiry_str: Optional[str]) -> bool:
     """Check if OTP expiry time is still valid."""
     if not expiry_str:
@@ -181,3 +198,37 @@ async def get_current_user(
     if not user_dict.get("is_verified"):
         raise HTTPException(status_code=403, detail="Email not verified. Please verify your email first.")
     return UserResponse(**user_dict)
+=======
+def send_verification_email(email: str, otp: str) -> None:
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.getenv("SMTP_USERNAME")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    sender_email = os.getenv("SMTP_SENDER_EMAIL", smtp_username or "")
+
+    if not smtp_username or not smtp_password or not sender_email:
+        raise RuntimeError(
+            "SMTP credentials are missing. Set SMTP_USERNAME, SMTP_PASSWORD, and SMTP_SENDER_EMAIL."
+        )
+
+    message = EmailMessage()
+    message["Subject"] = "Intervia AI sends your verification code for registration"
+    message["From"] = f"Intervia AI <{sender_email}>"
+    message["To"] = email
+    message.set_content(
+        f"""Hi,
+
+Intervia AI sends your verification code for registration.
+
+Verification Code: {otp}
+
+This code will expire in 10 minutes.
+If you did not request this, you can ignore this email.
+"""
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+        server.starttls()
+        server.login(smtp_username, smtp_password)
+        server.send_message(message)
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914

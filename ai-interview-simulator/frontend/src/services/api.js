@@ -5,7 +5,11 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const api = axios.create({
   baseURL: API_URL,
   headers: { 'Content-Type': 'application/json' },
-  timeout: 15000
+
+  timeout: 15000,
+
+  timeout: 30000
+
 });
 
 api.interceptors.request.use((config) => {
@@ -35,11 +39,13 @@ export const authAPI = {
   login: (data) => api.post('/api/auth/login', data),
   verifyOtp: (data) => api.post('/api/auth/verify-otp', data),
   resendOtp: (data) => api.post('/api/auth/resend-otp', data),
+
   forgotPassword: (data) => api.post('/api/auth/forgot-password', data),
   verifyForgotOtp: (data) => api.post('/api/auth/verify-forgot-otp', data),
   resetPassword: (data) => api.post('/api/auth/reset-password', data),
   logout: () => api.post('/api/auth/logout'),
   getMe: () => api.get('/api/auth/me'),
+
 };
 
 // ─────────────────────────────────────────────

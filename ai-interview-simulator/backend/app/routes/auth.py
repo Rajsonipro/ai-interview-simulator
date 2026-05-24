@@ -1,10 +1,17 @@
 from fastapi import APIRouter, HTTPException, Depends, Request
 from sqlite3 import Connection, IntegrityError
 from app.database.db import get_db
+<<<<<<< HEAD
 from app.models.schemas import (
     UserRegister, UserLogin, OTPVerify, OTPResend,
     ForgotPasswordRequest, ForgotPasswordVerify, ResetPassword,
     AuthResponse, UserResponse
+=======
+from app.models.schemas import UserRegister, UserLogin, TokenResponse, UserResponse, OTPVerify, EmailRequest
+from app.services.auth_service import (
+    hash_password, verify_password, create_access_token, 
+    generate_otp, get_otp_expiry, send_verification_email
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 )
 from app.services.auth_service import (
     hash_password, verify_password, validate_password_strength,
@@ -27,6 +34,7 @@ import json
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 
 # ═══════════════════════════════════════════════
 # REGISTER
@@ -42,6 +50,28 @@ async def register(
     # Rate limit: 3 registrations per IP per minute
     check_rate_limit(request, "register", max_requests=3)
 
+=======
+def _parse_otp_expiry(otp_expiry_value):
+    if not otp_expiry_value:
+        return None
+    if isinstance(otp_expiry_value, datetime):
+        return otp_expiry_value
+    if isinstance(otp_expiry_value, str):
+        try:
+            return datetime.fromisoformat(otp_expiry_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+@router.post("/register", response_model=dict)
+def register(user: UserRegister, db: Connection = Depends(get_db)):
+    print(f"\n--- NEW REGISTRATION ATTEMPT ---")
+    print(f"Data: username={user.username}, email={user.email}")
+    
+    if len(user.password) < 6:
+        print("Error: Password too short")
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
     if len(user.username) < 3:
         raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
 
@@ -70,6 +100,7 @@ async def register(
 
     # Send OTP via email
     try:
+<<<<<<< HEAD
         await send_otp_email(user.email, otp, purpose="verification")
     except Exception as e:
         logger.error(f"Failed to send verification email: {e}")
@@ -157,6 +188,17 @@ async def verify_otp(
 ):
     """Verify OTP sent during registration."""
     check_rate_limit(request, "verify_otp", max_requests=5)
+=======
+        send_verification_email(user.email, otp)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not send verification email: {str(e)}"
+        )
+    print("Verification email sent (log)")
+    
+    return {"message": "Registration successful. Please check your email for the verification code.", "email": user.email}
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
     cursor = db.cursor()
     cursor.execute("SELECT * FROM users WHERE email = ?", (data.email,))
@@ -168,12 +210,16 @@ async def verify_otp(
     if user["is_verified"]:
         raise HTTPException(status_code=400, detail="Email already verified")
 
+<<<<<<< HEAD
     # Check OTP attempts
     if user["otp_attempts"] >= MAX_OTP_ATTEMPTS:
         raise HTTPException(
             status_code=429,
             detail="Too many incorrect attempts. Please request a new OTP."
         )
+=======
+    stored_expiry = _parse_otp_expiry(user["otp_expiry"])
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
     # Verify OTP
     if user["verification_otp"] != data.otp:
@@ -188,9 +234,14 @@ async def verify_otp(
             detail=f"Invalid OTP. {max(0, remaining)} attempt(s) remaining."
         )
 
+<<<<<<< HEAD
     # Check expiry
     if not verify_otp_not_expired(user["otp_expiry"]):
         raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+=======
+    if not stored_expiry or stored_expiry < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new code.")
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
     # Verify user and create session
     session_token = generate_session_token()
@@ -230,8 +281,24 @@ async def resend_otp(
     if not user:
         raise HTTPException(status_code=404, detail="Email not found. Please register first.")
 
+<<<<<<< HEAD
     if user["is_verified"]:
         raise HTTPException(status_code=400, detail="Email already verified. Please log in.")
+=======
+    if not user["is_verified"]:
+        otp = generate_otp()
+        otp_expiry = get_otp_expiry()
+        cursor.execute(
+            "UPDATE users SET verification_otp = ?, otp_expiry = ? WHERE id = ?",
+            (otp, otp_expiry, user["id"])
+        )
+        db.commit()
+        try:
+            send_verification_email(user["email"], otp)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unable to send verification code: {str(e)}")
+        raise HTTPException(status_code=403, detail="Email not verified. A new verification code was sent.")
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
     otp = generate_otp()
     otp_expiry = get_otp_expiry()
@@ -241,6 +308,7 @@ async def resend_otp(
     )
     db.commit()
 
+<<<<<<< HEAD
     try:
         await send_otp_email(data.email, otp, purpose="verification")
     except Exception as e:
@@ -270,16 +338,33 @@ async def forgot_password(
     if not user:
         # Don't reveal if email exists - return generic message
         return {"message": "If this email is registered, you will receive a password reset code.", "email": data.email}
+=======
+
+@router.post("/resend-otp", response_model=dict)
+def resend_otp(data: EmailRequest, db: Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM users WHERE email = ?", (data.email,))
+    user = cursor.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user["is_verified"]:
+        raise HTTPException(status_code=400, detail="User is already verified")
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
     otp = generate_otp()
     otp_expiry = get_otp_expiry()
     cursor.execute(
+<<<<<<< HEAD
         "UPDATE users SET forgot_password_otp = ?, forgot_otp_expiry = ?, forgot_otp_attempts = 0 WHERE id = ?",
+=======
+        "UPDATE users SET verification_otp = ?, otp_expiry = ? WHERE id = ?",
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
         (otp, otp_expiry, user["id"])
     )
     db.commit()
 
     try:
+<<<<<<< HEAD
         await send_otp_email(data.email, otp, purpose="forgot_password")
     except Exception as e:
         logger.error(f"Failed to send forgot password email: {e}")
@@ -435,6 +520,15 @@ async def get_me(current_user: UserResponse = Depends(get_current_user)):
 # ═══════════════════════════════════════════════
 # SOCIAL LOGIN - Google & GitHub
 # ═══════════════════════════════════════════════
+=======
+        send_verification_email(data.email, otp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to resend verification code: {str(e)}")
+
+    return {"message": "Verification code sent successfully"}
+
+# --- OAuth Routes ---
+>>>>>>> 4ed7eccdcec73f944774c09428e67dbda4a39914
 
 @router.get("/oauth/{provider}")
 async def oauth_login(provider: str, request: Request):
